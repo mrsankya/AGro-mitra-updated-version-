@@ -1,0 +1,9 @@
+{
+  "name": " Agro Mitra - Climate-Resilient Crop Planning",
+  "description": "A digital decision-support platform providing localized, climate-smart crop recommendations and advisory for farmers using AI and data visualization.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera",
+    "geolocation"
+  ]
+}
