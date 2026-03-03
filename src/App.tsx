@@ -19,6 +19,7 @@ import {
   Droplets,
   Wind,
   Sun,
+  Moon,
   Menu,
   X,
   Send,
@@ -44,8 +45,13 @@ import {
   Map,
   Layers,
   Mountain,
-  Navigation
+  Navigation,
+  Share2,
+  Image as ImageIcon,
+  MicOff,
+  Radio
 } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
 import { 
   AreaChart,
   Area,
@@ -62,7 +68,10 @@ import {
 } from 'recharts';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { getGeminiResponse, speakText, getDynamicCropRecommendations, getCropComparison, analyzeCropImage, moderateChaupalPost } from './services/gemini';
+import { getGeminiResponse, getGeminiChatResponse, speakText, getDynamicCropRecommendations, getCropComparison, analyzeCropImage, moderateChaupalPost } from './services/gemini';
+import MapComponent from './components/MapComponent';
+import { AudioStreamer, AudioPlayer } from './services/audio';
+import { GoogleGenAI, Modality } from '@google/genai';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -337,7 +346,7 @@ const Card = ({ children, className, onClick, id, ...props }: { children: React.
     onClick={onClick}
     {...props}
     className={cn(
-      "glass-card rounded-3xl p-6 transition-all", 
+      "glass-card rounded-3xl p-6 transition-all dark:bg-gray-800 dark:border-gray-700 dark:text-gray-100", 
       onClick && "cursor-pointer hover:shadow-lg hover:border-leaf-green/30 hover:-translate-y-1",
       className
     )}
@@ -409,6 +418,32 @@ function MarketTicker() {
   );
 }
 
+const LanguageSlider = ({ currentLang, onChange }: { currentLang: string, onChange: (lang: string) => void }) => {
+  const langs = ['en', 'hi', 'mr', 'hi_en'];
+  const labels: Record<string, string> = { en: 'EN', hi: 'HI', mr: 'MR', hi_en: 'HN' };
+  
+  return (
+    <div className="flex items-center bg-gray-100/80 backdrop-blur-sm rounded-full p-1 relative shadow-inner border border-gray-200/50">
+      <div 
+        className="absolute top-1 bottom-1 w-8 bg-forest-green rounded-full shadow-md transition-all duration-300 ease-out"
+        style={{ transform: `translateX(${langs.indexOf(currentLang) * 32}px)` }}
+      />
+      {langs.map((lang) => (
+        <button
+          key={lang}
+          onClick={() => onChange(lang)}
+          className={cn(
+            "relative z-10 w-8 h-8 flex items-center justify-center rounded-full text-[10px] font-bold transition-colors duration-300",
+            currentLang === lang ? "text-white" : "text-earthy-brown hover:text-forest-green"
+          )}
+        >
+          {labels[lang]}
+        </button>
+      ))}
+    </div>
+  );
+};
+
 // --- Main App ---
 
 export default function App() {
@@ -434,10 +469,15 @@ export default function App() {
   const [isComparing, setIsComparing] = useState(false);
   const [comparisonData, setComparisonData] = useState<any>(null);
   const [selectedForCompare, setSelectedForCompare] = useState<string[]>([]);
-  const [chatMessages, setChatMessages] = useState<{role: 'user' | 'ai', text: string}[]>([]);
+  const [chatMessages, setChatMessages] = useState<{role: 'user' | 'ai', text: string, image?: string}[]>([]);
   const [userInput, setUserInput] = useState('');
   const [isListening, setIsListening] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
+  const [selectedChatImage, setSelectedChatImage] = useState<string | null>(null);
+  const [isLiveMode, setIsLiveMode] = useState(false);
+  const audioStreamerRef = useRef<AudioStreamer | null>(null);
+  const audioPlayerRef = useRef<AudioPlayer | null>(null);
+  const liveSessionRef = useRef<any>(null);
   const [activeQuickAction, setActiveQuickAction] = useState<string | null>(null);
   const [climateInsight, setClimateInsight] = useState("Based on current trends, the monsoon is expected to be 10% above average. Consider planting water-intensive crops like Rice in low-lying areas for maximum yield.");
   const [sowingSchedule, setSowingSchedule] = useState<any[]>([]);
@@ -631,19 +671,108 @@ export default function App() {
 
   const handleSendMessage = async (text?: string) => {
     const message = text || userInput;
-    if (!message.trim()) return;
+    const image = selectedChatImage;
+    if (!message.trim() && !image) return;
 
-    setChatMessages(prev => [...prev, { role: 'user', text: message }]);
+    setChatMessages(prev => [...prev, { role: 'user', text: message, image: image || undefined }]);
     setUserInput('');
+    setSelectedChatImage(null);
     setIsThinking(true);
     setActiveTab('chat');
 
-    const response = await getGeminiResponse(message, { region, soilType, recommendations, language: i18n.language });
+    const response = await getGeminiChatResponse(message, image || undefined, { region, soilType, recommendations, language: i18n.language });
     setIsThinking(false);
     setChatMessages(prev => [...prev, { role: 'ai', text: response || '' }]);
     
-    if (response) {
+    if (response && !isLiveMode) {
       speakText(response);
+    }
+  };
+
+  const handleChatImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setSelectedChatImage(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const toggleLiveMode = async () => {
+    if (isLiveMode) {
+      // Stop Live Mode
+      setIsLiveMode(false);
+      if (audioStreamerRef.current) {
+        audioStreamerRef.current.stopRecording();
+      }
+      if (audioPlayerRef.current) {
+        audioPlayerRef.current.stop();
+      }
+      if (liveSessionRef.current) {
+        liveSessionRef.current.close();
+      }
+      setChatMessages(prev => [...prev, { role: 'ai', text: 'Live audio session ended.' }]);
+      return;
+    }
+
+    // Start Live Mode
+    setIsLiveMode(true);
+    setChatMessages(prev => [...prev, { role: 'ai', text: 'Live audio session started. Speak now...' }]);
+    
+    if (!audioStreamerRef.current) audioStreamerRef.current = new AudioStreamer();
+    if (!audioPlayerRef.current) audioPlayerRef.current = new AudioPlayer();
+
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    
+    try {
+      const sessionPromise = ai.live.connect({
+        model: "gemini-2.5-flash-native-audio-preview-09-2025",
+        callbacks: {
+          onopen: () => {
+            audioStreamerRef.current?.startRecording((base64Data) => {
+              sessionPromise.then((session) => {
+                session.sendRealtimeInput({
+                  media: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+                });
+              });
+            });
+          },
+          onmessage: async (message) => {
+            const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
+            if (base64Audio) {
+              audioPlayerRef.current?.playPCM(base64Audio);
+            }
+            if (message.serverContent?.interrupted) {
+              audioPlayerRef.current?.stop();
+            }
+          },
+          onclose: () => {
+            setIsLiveMode(false);
+            audioStreamerRef.current?.stopRecording();
+            audioPlayerRef.current?.stop();
+          },
+          onerror: (err) => {
+            console.error("Live API Error:", err);
+            setIsLiveMode(false);
+            audioStreamerRef.current?.stopRecording();
+            audioPlayerRef.current?.stop();
+          }
+        },
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
+          },
+          systemInstruction: `You are Agro Mitra AI, a helpful agricultural assistant. The user is in ${region} with ${soilType} soil. Keep responses short and conversational.`,
+        },
+      });
+      liveSessionRef.current = await sessionPromise;
+    } catch (err) {
+      console.error("Failed to start live session:", err);
+      setIsLiveMode(false);
+      setChatMessages(prev => [...prev, { role: 'ai', text: 'Failed to start live audio session. Please try again.' }]);
     }
   };
 
@@ -689,12 +818,6 @@ export default function App() {
       handleSendMessage(transcript);
     };
     recognition.start();
-  };
-
-  const toggleLanguage = () => {
-    const langs = ['en', 'hi', 'mr', 'hi_en'];
-    const next = langs[(langs.indexOf(i18n.language) + 1) % langs.length];
-    i18n.changeLanguage(next);
   };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -885,14 +1008,8 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <button 
-            onClick={toggleLanguage}
-            className="p-2 hover:bg-gray-100 rounded-full transition-colors flex items-center gap-1 text-sm font-medium"
-          >
-            <Languages size={18} />
-            <span className="uppercase">{i18n.language === 'hi_en' ? 'Hinglish' : i18n.language}</span>
-          </button>
+        <div className="flex items-center gap-4">
+          <LanguageSlider currentLang={i18n.language} onChange={(lang) => i18n.changeLanguage(lang)} />
           <button 
             onClick={() => setIsMenuOpen(!isMenuOpen)}
             className="p-2 hover:bg-gray-100 rounded-full transition-colors md:hidden"
@@ -912,7 +1029,7 @@ export default function App() {
             className="fixed inset-0 z-40 bg-white pt-20 px-6 md:hidden"
           >
             <nav className="flex flex-col gap-4">
-              {['dashboard', 'advisor', 'calendar', 'chat', 'chaupal'].map((tab) => (
+              {['dashboard', 'advisor', 'calendar', 'chat', 'chaupal', 'profile'].map((tab) => (
                 <button
                   key={tab}
                   onClick={() => { setActiveTab(tab); setIsMenuOpen(false); }}
@@ -921,7 +1038,7 @@ export default function App() {
                     activeTab === tab ? "text-forest-green" : "text-gray-400"
                   )}
                 >
-                  {tab === 'calendar' ? 'Sowing Calendar' : tab === 'chaupal' ? 'Kisan Chaupal' : t(tab)}
+                  {tab === 'calendar' ? 'Sowing Calendar' : tab === 'chaupal' ? 'Kisan Chaupal' : tab === 'profile' ? 'My Profile' : t(tab)}
                 </button>
               ))}
               <button 
@@ -949,6 +1066,7 @@ export default function App() {
               <NavButton active={activeTab === 'calendar'} onClick={() => setActiveTab('calendar')} icon={Calendar} label="Sowing Calendar" />
               <NavButton active={activeTab === 'chat'} onClick={() => setActiveTab('chat')} icon={MessageSquare} label={t('ask_ai')} />
               <NavButton active={activeTab === 'chaupal'} onClick={() => setActiveTab('chaupal')} icon={Users} label="Kisan Chaupal" />
+              <NavButton active={activeTab === 'profile'} onClick={() => setActiveTab('profile')} icon={User} label="My Profile" />
               
               <div className="mt-8 pt-8 border-t border-gray-200">
                 <div className="bg-white/60 backdrop-blur-md p-5 rounded-[2rem] border border-forest-green/10 shadow-sm">
@@ -1272,6 +1390,19 @@ export default function App() {
                 <div className="absolute -right-20 -bottom-20 w-64 h-64 bg-forest-green/5 rounded-full blur-3xl" />
                 <div className="absolute -left-10 -top-10 w-40 h-40 bg-forest-green/5 rounded-full blur-2xl" />
               </Card>
+
+              {/* Map Component */}
+              <div className="space-y-4">
+                <h3 className="text-xl font-bold text-forest-green flex items-center gap-2">
+                  <MapPin className="text-leaf-green" />
+                  Regional Crop Zones
+                </h3>
+                <MapComponent 
+                  selectedRegion={region} 
+                  selectedSoil={soilType} 
+                  dynamicCrops={dynamicCrops} 
+                />
+              </div>
 
               {dynamicCrops.length > 0 && (
                 <div className="space-y-6">
@@ -1705,7 +1836,7 @@ export default function App() {
                             <span className={cn(
                               "px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest shadow-sm",
                               item.status === 'Completed' ? "bg-gray-100 text-gray-500" : 
-                              item.status === 'In Progress' ? "bg-leaf-green/10 text-leaf-green" : "bg-orange-50 text-orange-600"
+                              item.status === 'In Progress' ? "bg-leaf-green text-white" : "bg-orange-50 text-orange-600"
                             )}>
                               {item.status}
                             </span>
@@ -1789,6 +1920,16 @@ export default function App() {
                         <span className="text-[10px] font-bold text-forest-green uppercase tracking-wider">AI Powered</span>
                       </div>
                       <button 
+                        onClick={toggleLiveMode}
+                        className={cn(
+                          "hidden sm:flex items-center gap-2 px-4 py-2 rounded-full border transition-all shadow-sm font-bold text-xs uppercase tracking-wider",
+                          isLiveMode ? "bg-red-50 text-red-600 border-red-200 animate-pulse" : "bg-soft-cream text-forest-green border-forest-green/5 hover:bg-leaf-green/10"
+                        )}
+                      >
+                        {isLiveMode ? <MicOff size={16} /> : <Radio size={16} />}
+                        {isLiveMode ? "End Live" : "Live Audio"}
+                      </button>
+                      <button 
                         onClick={() => setActiveTab('dashboard')}
                         className="hidden md:flex items-center gap-2 px-6 py-2 bg-forest-green text-white rounded-full font-bold hover:bg-leaf-green transition-all shadow-lg"
                       >
@@ -1849,6 +1990,9 @@ export default function App() {
                             : "bg-white text-forest-green rounded-tl-none border border-forest-green/5"
                         )}>
                           <p className="text-base whitespace-pre-wrap font-medium leading-relaxed">{msg.text}</p>
+                          {msg.image && (
+                            <img src={msg.image} alt="Uploaded" className="mt-3 rounded-xl max-w-full h-auto max-h-48 object-cover border-2 border-white/20" />
+                          )}
                           <span className={cn(
                             "text-[9px] uppercase font-bold tracking-widest mt-3 block opacity-50",
                             msg.role === 'user' ? "text-right" : "text-left"
@@ -1874,12 +2018,29 @@ export default function App() {
                   </div>
 
                   <div className="p-6 bg-white border-t border-forest-green/10">
+                    {selectedChatImage && (
+                      <div className="mb-4 relative inline-block">
+                        <img src={selectedChatImage} alt="Preview" className="h-20 w-20 object-cover rounded-xl border-2 border-leaf-green shadow-md" />
+                        <button 
+                          onClick={() => setSelectedChatImage(null)}
+                          className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 shadow-lg hover:bg-red-600"
+                        >
+                          <X size={12} />
+                        </button>
+                      </div>
+                    )}
                     <div className="max-w-4xl mx-auto flex items-center gap-3 bg-[#F8F9FA] rounded-3xl px-6 py-3 border-2 border-transparent focus-within:border-leaf-green/30 transition-all shadow-inner">
+                      <label className="p-3 rounded-2xl transition-all text-leaf-green hover:bg-forest-green/10 cursor-pointer">
+                        <ImageIcon size={24} />
+                        <input type="file" accept="image/*" className="hidden" onChange={handleChatImageUpload} />
+                      </label>
                       <button 
                         onClick={startVoiceInput} 
+                        disabled={isLiveMode}
                         className={cn(
                           "p-3 rounded-2xl transition-all", 
-                          isListening ? "bg-red-500 text-white animate-pulse shadow-lg" : "text-leaf-green hover:bg-forest-green/10"
+                          isListening ? "bg-red-500 text-white animate-pulse shadow-lg" : "text-leaf-green hover:bg-forest-green/10",
+                          isLiveMode && "opacity-50 cursor-not-allowed"
                         )}
                       >
                         <Mic size={24} />
@@ -1889,15 +2050,16 @@ export default function App() {
                         value={userInput}
                         onChange={(e) => setUserInput(e.target.value)}
                         onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
-                        placeholder="Type your question here..."
-                        className="flex-1 bg-transparent border-none focus:ring-0 text-base py-2 font-medium text-forest-green placeholder:text-gray-400"
+                        disabled={isLiveMode}
+                        placeholder={isLiveMode ? "Live audio mode active..." : "Type your question here..."}
+                        className="flex-1 bg-transparent border-none focus:ring-0 text-base py-2 font-medium text-forest-green placeholder:text-gray-400 disabled:opacity-50"
                       />
                       <button 
                         onClick={() => handleSendMessage()}
-                        disabled={!userInput.trim() && !isThinking}
+                        disabled={(!userInput.trim() && !selectedChatImage) || isThinking || isLiveMode}
                         className={cn(
                           "p-3 rounded-2xl transition-all",
-                          userInput.trim() ? "bg-forest-green text-white shadow-lg" : "text-gray-300"
+                          (userInput.trim() || selectedChatImage) && !isLiveMode ? "bg-forest-green text-white shadow-lg" : "text-gray-300"
                         )}
                       >
                         <Send size={24} />
@@ -2032,6 +2194,52 @@ export default function App() {
               </div>
             </motion.div>
           )}
+          {activeTab === 'profile' && (
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-8 max-w-5xl mx-auto">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-3xl font-bold text-forest-green">My Profile</h2>
+                  <p className="text-gray-500 text-sm">Manage your farm details and share your profile.</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                <Card className="p-8 bg-white border-forest-green/10 shadow-xl flex flex-col items-center text-center space-y-6">
+                  <div className="w-24 h-24 bg-forest-green rounded-3xl flex items-center justify-center text-white text-3xl font-bold shadow-lg transform rotate-3">
+                    {user.name[0].toUpperCase()}
+                  </div>
+                  <div>
+                    <h3 className="text-2xl font-bold text-forest-green">{user.name}</h3>
+                    <p className="text-earthy-brown font-medium">{region} • {soilType} Soil</p>
+                  </div>
+                  <div className="p-4 bg-soft-cream rounded-2xl border border-forest-green/5 w-full">
+                    <p className="text-xs font-bold uppercase tracking-widest text-forest-green/60 mb-2">My Crops</p>
+                    <div className="flex flex-wrap gap-2 justify-center">
+                      {dynamicCrops.length > 0 ? (
+                        dynamicCrops.slice(0, 3).map(c => c.name).map((crop, i) => (
+                          <span key={i} className="px-3 py-1 bg-leaf-green/10 text-leaf-green rounded-lg text-sm font-bold border border-leaf-green/20">
+                            {crop}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-sm text-gray-500 font-medium">No crops analyzed yet. Go to Crop Advisor!</span>
+                      )}
+                    </div>
+                  </div>
+                </Card>
+                <Card className="p-8 bg-forest-green text-white border-none shadow-xl flex flex-col items-center text-center space-y-6 relative overflow-hidden">
+                  <div className="relative z-10 space-y-6 flex flex-col items-center">
+                    <h3 className="text-xl font-bold">Share Farm Profile</h3>
+                    <p className="text-white/80 text-sm font-medium">Scan this QR code to view {user.name}'s farm details, crop history, and soil health.</p>
+                    <div className="p-4 bg-white rounded-2xl shadow-lg transform hover:scale-105 transition-transform">
+                      <QRCodeSVG value={`https://agromitra.app/profile/${user.name.replace(/\s+/g, '-').toLowerCase()}`} size={150} level="H" />
+                    </div>
+                    <Button variant="secondary" className="w-full" icon={Share2}>Share Link</Button>
+                  </div>
+                  <div className="absolute -right-20 -bottom-20 w-64 h-64 bg-white/10 rounded-full blur-3xl" />
+                </Card>
+              </div>
+            </motion.div>
+          )}
         </div>
       </main>
 
@@ -2040,9 +2248,8 @@ export default function App() {
         <MobileNavItem active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} icon={CloudRain} label={t('dashboard')} />
         <MobileNavItem active={activeTab === 'advisor'} onClick={() => setActiveTab('advisor')} icon={Sprout} label={t('crop_advisor')} />
         <MobileNavItem active={activeTab === 'doctor'} onClick={() => setActiveTab('doctor')} icon={Camera} label="Doctor" />
-        <MobileNavItem active={activeTab === 'calendar'} onClick={() => setActiveTab('calendar')} icon={Calendar} label="Calendar" />
         <MobileNavItem active={activeTab === 'chat'} onClick={() => setActiveTab('chat')} icon={MessageSquare} label={t('ask_ai')} />
-        <MobileNavItem active={activeTab === 'chaupal'} onClick={() => setActiveTab('chaupal')} icon={Users} label="Chaupal" />
+        <MobileNavItem active={activeTab === 'profile'} onClick={() => setActiveTab('profile')} icon={User} label="Profile" />
       </nav>
     </div>
   );

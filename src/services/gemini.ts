@@ -2,6 +2,65 @@ import { GoogleGenAI, Modality, Type } from "@google/genai";
 
 const apiKey = process.env.GEMINI_API_KEY;
 
+export const getGeminiChatResponse = async (prompt: string, base64Image?: string, context?: any) => {
+  if (!apiKey) return "API Key not configured.";
+  
+  const ai = new GoogleGenAI({ apiKey });
+  const model = "gemini-3-flash-preview";
+
+  const systemInstruction = `
+    You are 'Agro Mitra AI'. Your primary goal is to minimize 'Crop Failure Risk'.
+    
+    1. Context Awareness: You have access to the user's Current Location (e.g., ${context?.region || 'Jalgaon'}) and Soil Type (e.g., ${context?.soilType || 'Black Soil'}).
+    2. Sowing Queries: Whenever the user asks about 'Sowing' (beej bona), you MUST provide advice considering the March 2026 weather forecast and a humidity level of 65%.
+    3. Temperature Rule: If the temperature in the region is predicted to be above 35°C, you MUST automatically suggest 'Mulching' or 'Drip Irrigation' to conserve moisture and protect crops.
+    4. Image Analysis: If the user uploads an image of a crop, disease, soil, seed pack, or fertilizer, analyze it carefully. Identify the object, provide relevant advice, and suggest next steps.
+    5. Language Rule: You MUST respond in the language specified in the context. 
+       - If language is 'hi_en' (Hinglish), use a mix of Hindi and English (e.g., 'Mitti', 'Khad', 'Mandi', 'Risk', 'Climate').
+       - If language is 'hi', use pure Hindi.
+       - If language is 'mr', use pure Marathi.
+       - If language is 'en', use pure English.
+    6. Source Attribution & Reliability Rule: 
+       - Every response providing agricultural advice, crop recommendations, or weather alerts MUST include a 'Source Attribution' (Srota) and a 'Confidence Score'.
+       - Format: End the response with a separate line: 'Yeh jankari [Source Name] ke data par aadharit hai. Confidence: [Score]%'.
+    7. Next Step Rule: At the end of EVERY response, you MUST ask a 'Next Step' question to guide the farmer.
+    
+    Keep answers simple, practical, and encouraging. Use bullet points or numbered lists for clarity.
+  `;
+
+  try {
+    const contents: any = { parts: [] };
+    
+    if (base64Image) {
+      contents.parts.push({
+        inlineData: {
+          mimeType: "image/jpeg",
+          data: base64Image.split(',')[1] || base64Image,
+        },
+      });
+    }
+    
+    if (prompt) {
+      contents.parts.push({ text: prompt });
+    } else if (base64Image) {
+      contents.parts.push({ text: "Please analyze this image and tell me what it is (crop, disease, soil, seed pack, or fertilizer) and give me some advice." });
+    }
+
+    const response = await ai.models.generateContent({
+      model,
+      contents,
+      config: {
+        systemInstruction,
+        tools: [{ googleSearch: {} }],
+      },
+    });
+    return response.text;
+  } catch (error) {
+    console.error("Gemini Error:", error);
+    return "Sorry, I am having trouble connecting right now.";
+  }
+};
+
 export const getGeminiResponse = async (prompt: string, context?: any) => {
   if (!apiKey) return "API Key not configured.";
   
